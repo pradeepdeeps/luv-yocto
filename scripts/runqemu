@@ -59,8 +59,12 @@ error() {
 }
 
 MACHINE=${MACHINE:=""}
+echo $MACHINE
 KERNEL=${KERNEL:=""}
+echo $KERNEL
 ROOTFS=${ROOTFS:=""}
+PXEROOTFS=${ROOTFS:=""}
+echo $ROOTFS
 VM=${VM:=""}
 FSTYPE=""
 LAZY_ROOTFS=""
@@ -87,6 +91,7 @@ process_filename() {
 		if [ -z "$FSTYPE" -o "$FSTYPE" = "$EXT" ]; then
 		    FSTYPE=$EXT
 		    ROOTFS=$filename
+		    echo $ROOTFS	
 		else
 		    error "conflicting FSTYPE types [$FSTYPE] and [$EXT]"
 		fi
@@ -120,6 +125,7 @@ while true; do
             [ -z "$ROOTFS" ] || \
 		error "conflicting ROOTFS args [$ROOTFS] and [$arg]"
             if [ -f "$arg" ]; then
+		echo "Process filw=e Name"
                 process_filename $arg
             elif [ -d "$arg" ]; then
                 # Handle the case where the nfsroot dir has -image-
@@ -128,13 +134,18 @@ while true; do
                 FSTYPE=nfs
                 ROOTFS=$arg
             else
+		echo "lazy rootfs" 
                 ROOTFS=$arg
                 LAZY_ROOTFS="true"
             fi
             ;;
         "ramfs")
+	    echo "ramfs"	
             FSTYPE=cpio.gz
             RAMFS=true
+            ;;
+	"pxe")
+            PXE=true
             ;;
         "iso")
 	    FSTYPE=iso
@@ -208,6 +219,7 @@ while true; do
     esac
     shift
 done
+
 
 if [ ! -c /dev/net/tun ] ; then
 	echo "TUN control device /dev/net/tun is unavailable; you may need to enable TUN (e.g. sudo modprobe tun)"
@@ -419,6 +431,106 @@ findimage() {
     exit 1
 }
 
+
+
+pxe_setup_tap() {
+   SCRIPT_DIR=`dirname $0`
+   RUNQEMU_IFUP="$SCRIPT_DIR/runqemu-ifup"
+   if [ ! -x "$RUNQEMU_IFUP" ]; then
+        echo "Error: Unable to find the runqemu-ifup script in $SCRIPT_DIR"
+        exit 1
+   fi
+
+   IFCONFIG=`which ip 2> /dev/null`
+   if [ -z "$IFCONFIG" ]; then
+        # Is it ever anywhere else?
+        IFCONFIG=/sbin/ip
+   fi
+   if [ ! -x "$IFCONFIG" ]; then
+       echo "$IFCONFIG cannot be executed"
+       exit 1
+   fi
+
+   TUNCTL=/usr/sbin/tunctl
+   if [[ ! -x "$TUNCTL" || -d "$TUNCTL" ]]; then
+        echo "Error: $TUNCTL is not an executable"
+        usage
+   fi
+   # Ensure we start with a clean slate
+   for tap in `$IFCONFIG link | grep tap | awk '{ print \$2 }' | sed s/://`; do
+        echo "Note: Destroying pre-existing tap interface $tap..."
+        $TUNCTL -d $tap
+   done
+
+
+   b=$(pwd)
+   TUID=$(id -u)
+   GID=$(id -g)
+   ifup=`sudo $RUNQEMU_IFUP $TUID $GID / 2>&1`
+   if [ $? -ne 0 ]; then
+       echo "Error running tunctl: $ifup"
+       exit 1
+   fi
+
+
+}
+
+pxe_start_dnsmasq() {
+   DNSMASQ=`which dnsmasq 2> /dev/null`
+   if [ -z "$DNSMASQ" ]; then
+        echo "Please Install dnsmasq"
+   fi
+   dnsmasq=`sudo killall dnsmasq 2>&1`
+   if [ $? -ne 0 ]; then
+       echo "No existing dnsmasq"
+   fi
+   INTERFACE="--interface tap0"
+   DHCPRANGE="--dhcp-range=192.168.7.100,192.168.7.120,12h"
+   TFTP="--enable-tftp --tftp-root=$DEPLOY_DIR_IMAGE"
+   DHCPBOOT="--dhcp-boot=/bootx64.efi"
+   echo $DEPLOY_DIR_IMAGE
+   dnsmasq=`sudo $DNSMASQ $INTERFACE $DHCPRANGE $TFTP $DHCPBOOT 2>&1`
+   if [ $? -ne 0 ]; then
+       echo "Unable to Start the dnsmasq service"
+   fi
+
+}
+
+
+
+# Locate a rootfs image to boot which matches our expected
+# machine and fstype. 
+pxe_boot() {
+   setup_path_vars
+   eval kernel_file=\$${machine2}_DEFAULT_KERNEL
+   KERNEL=$DEPLOY_DIR_IMAGE/$kernel_file
+   T=$DEPLOY_DIR_IMAGE
+   eval FSTYPE=\$${machine2}_DEFAULT_FSTYPE
+   
+   if [ -z "$OECORE_NATIVE_SYSROOT" ]; then
+        BUILD_ARCH=`uname -m`
+        BUILD_OS=`uname | tr '[A-Z]' '[a-z]'`
+        BUILD_SYS="$BUILD_ARCH-$BUILD_OS"
+
+        OECORE_NATIVE_SYSROOT=$OE_TMPDIR/sysroots/$BUILD_SYS
+   fi
+   
+   mkdir -p $DEPLOY_DIR_IMAGE/EFI
+   mkdir -p $DEPLOY_DIR_IMAGE/EFI/BOOT
+   printf "menuentry \"linux\" {
+linux /%s
+initrd /%s
+}" $kernel_file $PXEROOTFS > $DEPLOY_DIR_IMAGE/EFI/BOOT/grub.cfg
+
+   pxe_setup_tap
+   pxe_start_dnsmasq
+   QEMU="$OECORE_NATIVE_SYSROOT/usr/bin/qemu-system-x86_64"
+   QEMUNETWORKCMD="-boot n -netdev tap,id=vmnet0,ifname=tap0,script=no,downscript=no -device rtl8139,netdev=vmnet0"
+   EFIBIOS="$OECORE_NATIVE_SYSROOT/usr/share/ovmf/bios.bin"
+   sudo $QEMU -bios $EFIBIOS $QEMUNETWORKCMD
+}
+
+
 if [ -e "$ROOTFS" -a -z "$FSTYPE" ]; then
     # Extract the filename extension
     EXT=`echo $ROOTFS | awk -F . '{ print \$NF }'`
@@ -459,6 +571,7 @@ fi
 if [ "$LAZY_ROOTFS" = "true" ]; then
     setup_path_vars 1
     echo "Assuming $ROOTFS really means $DEPLOY_DIR_IMAGE/$ROOTFS-$MACHINE.$FSTYPE"
+    PXEROOTFS=$ROOTFS-$MACHINE.$FSTYPE
     ROOTFS=$DEPLOY_DIR_IMAGE/$ROOTFS-$MACHINE.$FSTYPE
 fi
 
@@ -473,6 +586,12 @@ if [ -z "$ROOTFS" -a "x$FSTYPE" != "xvmdk" ]; then
     fi
 fi
 # ROOTFS is now set for all cases
+
+if [ "$PXE" = true ] ; then
+   echo "Pxe is enabled" ;
+   pxe_boot
+   exit 1
+fi
 
 echo ""
 echo "Continuing with the following parameters:"

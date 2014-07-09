@@ -51,9 +51,9 @@ USERID="-u $1"
 GROUP="-g $2"
 NATIVE_SYSROOT_DIR=$3
 
-TUNCTL=$NATIVE_SYSROOT_DIR/usr/bin/tunctl
+TUNCTL=$NATIVE_SYSROOT_DIR/usr/sbin/tunctl
 if [ ! -x "$TUNCTL" ]; then
-       echo "Error: Unable to find tunctl binary in '$NATIVE_SYSROOT_DIR/usr/bin', please bitbake qemu-helper-native"
+       echo "Error: Unable to find tunctl binary in '$NATIVE_SYSROOT_DIR/usr/sbin', please bitbake qemu-helper-native"
 	exit 1
 fi
 
@@ -91,7 +91,7 @@ fi
 
 n=$[ (`echo $TAP | sed 's/tap//'` * 2) + 1 ]
 $IFCONFIG addr add 192.168.7.$n/32 broadcast 192.168.7.255 dev $TAP
-$IFCONFIG link set dev $TAP up
+$IFCONFIG link set $TAP up
 
 dest=$[ (`echo $TAP | sed 's/tap//'` * 2) + 2 ]
 $IFCONFIG route add to 192.168.7.$dest dev $TAP
@@ -103,4 +103,19 @@ echo 1 > /proc/sys/net/ipv4/ip_forward
 echo 1 > /proc/sys/net/ipv4/conf/$TAP/proxy_arp
 $IPTABLES -P FORWARD ACCEPT
 
+IFCONFIG=`which ifconfig 2> /dev/null`
+
+if [ "x$IFCONFIG" = "x" ]; then
+        # better than nothing...
+        IFCONFIG=/sbin/ifconfig
+fi
+if [ ! -x "$IFCONFIG" ]; then
+        echo "$IFCONFIG cannot be executed"
+        exit 1
+fi
+
+echo $IFCONFIG
+n=$[ (`echo $TAP | sed 's/tap//'` * 2) + 3 ]
+echo $n
+$IFCONFIG $TAP 192.168.7.$n netmask 255.255.255.0 up
 echo $TAP
